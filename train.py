@@ -385,13 +385,19 @@ def run(graph, node_dict, gpb, args):
     for epoch in range(args.n_epochs):
 
         t0 = time.time()
-        selected = select_node(boundary, send_size)
-        one_hops = data_transfer(selected, recv_shape, tag=TransferTag.NODE, dtype=torch.long)
+        with nvtx.annotate("sampling"):
+            selected = select_node(boundary, send_size)
+        
+        with nvtx.annotate("transfer"):
+            one_hops = data_transfer(selected, recv_shape, tag=TransferTag.NODE, dtype=torch.long)
+
         ctx.buffer.set_selected(selected)
 
-        g = construct_graph(in_graph, out_graph, pos, one_hops)
+        with nvtx.annotate("construct"):
+            g = construct_graph(in_graph, out_graph, pos, one_hops)
 
-        model.train()
+        with nvtx.annotate("train"):
+            model.train()
 
         if args.model == 'gcn':
             out_norm_ = construct_out_norm(g.num_nodes('_V'), out_norm, pos, one_hops)
@@ -403,14 +409,19 @@ def run(graph, node_dict, gpb, args):
         else:
             raise NotImplementedError
 
+
         loss = loss_fcn(logits[train_mask], labels[train_mask])
         optimizer.zero_grad(set_to_none=True)
-        loss.backward()
+
+        with nvtx.annotate("backward"):
+            loss.backward()
 
         pre_reduce = time.time()
-        ctx.reducer.synchronize()
+        with nvtx.annotate("reduce"):
+            ctx.reducer.synchronize()
         reduce_time = time.time() - pre_reduce
-        optimizer.step()
+        with nvtx.annotate("optimizer"):
+            optimizer.step()
 
         if epoch >= 5:
             train_dur.append(time.time() - t0)

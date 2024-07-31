@@ -4,6 +4,8 @@ from torch import nn
 from module.sync_bn import SyncBatchNorm
 from helper import context as ctx
 
+import nvtx
+
 
 class GNNBase(nn.Module):
 
@@ -77,18 +79,33 @@ class GraphSAGE(GNNBase):
     def forward(self, g, feat, in_norm=None):
         h = feat
         for i in range(self.n_layers):
+            rng_fwd = nvtx.start_range(message="fwd", color="blue")
+
+            rng_drop = nvtx.start_range(message="drop", color="yellow")
             h = self.dropout(h)
+            nvtx.end_range(rng_drop)
+
             if i < self.n_layers - self.n_linear:
+
+                rng_upd = nvtx.start_range(message="upd", color="green")
                 if self.training and (i > 0 or not self.use_pp):
                     h = ctx.buffer.update(i, h)
+                nvtx.end_range(rng_upd)
+
+                rng_lay = nvtx.start_range(message="lay", color="red")
                 h = self.layers[i](g, h, in_norm)
+                nvtx.end_range(rng_lay)
             else:
                 h = self.layers[i](h)
 
+            rng_norm = nvtx.start_range(message="norm", color="purple")
             if i < self.n_layers - 1:
                 if self.use_norm:
                     h = self.norm[i](h)
                 h = self.activation(h)
+            nvtx.end_range(rng_norm)
+
+            nvtx.end_range(rng_fwd)
 
         return h
 

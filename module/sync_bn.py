@@ -3,6 +3,7 @@ from torch import nn
 import torch
 import torch.distributed as dist
 
+import nvtx
 
 class SyncBatchNormFunc(Function):
 
@@ -29,6 +30,7 @@ class SyncBatchNormFunc(Function):
 
     @staticmethod
     def backward(ctx, grad):
+        rng_bwd = nvtx.start_range(message="bwd", color="blue")
         x_hat, weight, std = ctx.saved_tensors
         dbias = grad.sum(axis=0)
         dweight = (grad * x_hat).sum(axis=0)
@@ -36,6 +38,7 @@ class SyncBatchNormFunc(Function):
         dist.all_reduce(dweight, op=dist.ReduceOp.SUM)
         n = ctx.whole_size
         dx = (weight / n) / std * (n * grad - dbias - x_hat * dweight)
+        nvtx.end_range(rng_bwd)
         return dx, dweight, dbias, None, None, None, None, None, None
 
 

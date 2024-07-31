@@ -4,6 +4,8 @@ import math
 
 import dgl.function as fn
 
+import nvtx
+
 
 class GCNLayer(nn.Module):
 

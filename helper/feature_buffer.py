@@ -2,6 +2,8 @@ import torch
 from helper.timer.timer import *
 import queue
 
+import nvtx
+
 
 class Buffer(object):
 
@@ -91,9 +93,14 @@ class Buffer(object):
         return torch.cat(tmp)
 
     def update(self, layer, feat):
+
+        rng_trans = nvtx.start_range("feat_transfer")
         with comm_timer.timer(f'forward_{layer}'):
             self.__feat_transfer(feat)
-        res = self.__feat_concat(feat)
+        nvtx.end_range(rng_trans)
+
+        with nvtx.annotate("scatter"):
+            res = self.__feat_concat(feat)
         if res.requires_grad:
             res.register_hook(self.__grad_hook(layer))
         return res
@@ -113,10 +120,17 @@ class Buffer(object):
             right = (rank + i) % size
             r2 = dist.irecv(recv_cpu[left], src=left)
             req.put((r2, left))
+
             if forward:
-                send_cpu[right].copy_(send_gpu[self._selected[right]] / self._ratio[right])
+                # send_cpu[right].copy_(send_gpu[self._selected[right]] / self._ratio[right])
+                with nvtx.annotate("gather"):
+                    acc = send_gpu[self._selected[right]] / self._ratio[right]
+                with nvtx.annotate("copy"):
+                    send_cpu[right].copy_(acc)
             else:
-                send_cpu[right].copy_(send_gpu[self._pl[right]:self._pr[right]])
+                with nvtx.annotate("copy"):
+                    send_cpu[right].copy_(send_gpu[self._pl[right]:self._pr[right]])
+
             r1 = dist.isend(send_cpu[right], dst=right)
             self._send_que.put(r1)
         while not req.empty():
@@ -124,9 +138,14 @@ class Buffer(object):
             # TODO: if not r.is_completed() run next r first (see issue #30723 of PyTorch)
             r.wait()
             if forward:
-                recv_gpu[idx].copy_(recv_cpu[idx], non_blocking=True)
+                with nvtx.annotate("copy"):
+                    recv_gpu[idx].copy_(recv_cpu[idx], non_blocking=True)
             else:
-                send_gpu[self._selected[idx]] += recv_cpu[idx].cuda(non_blocking=True) / self._ratio[idx]
+                with nvtx.annotate("copy"):
+                    acc = recv_cpu[idx].cuda(non_blocking=True) / self._ratio[idx]
+                with nvtx.annotate("scatter"):
+                    send_gpu[self._selected[idx]] += acc
+                # send_gpu[self._selected[idx]] += recv_cpu[idx].cuda(non_blocking=True) / self._ratio[idx]
 
     @torch.no_grad()
     def __mpi_all_to_all(self, send, recv, forward=True):
